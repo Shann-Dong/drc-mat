@@ -7,7 +7,10 @@ from networks import model
 
 from isegm.utils import exp
 from isegm.inference import utils
-from interactive_demo.app import InteractiveDemoApp
+# from interactive_demo.app import InteractiveDemoApp
+# from interactive_demo.app4 import InteractiveDemoApp
+# from interactive_demo.app5 import InteractiveDemoApp
+from interactive_demo.app6 import InteractiveDemoApp
 
 import torch
 import torch.nn as nn
@@ -107,9 +110,9 @@ class Generator_MatteFormer(nn.Module):
 def main():
     args = parse_args()
 
-    torch.backends.cudnn.deterministic = True
-    checkpoint_path = utils.find_checkpoint('.', args.checkpoint_c2t)
-    c2t_model = utils.load_is_model(checkpoint_path, args.device, args.eval_ritm, cpu_dist_maps=True)
+    # torch.backends.cudnn.deterministic = True
+    # checkpoint_path = utils.find_checkpoint('.', args.checkpoint_c2t)
+    # c2t_model = utils.load_is_model(checkpoint_path, args.device, args.eval_ritm, cpu_dist_maps=True)
 
 
 
@@ -119,14 +122,16 @@ def main():
     # matting_model.cuda()
     # matting_model.eval()
 
-    matmodel = model.AEMatter()
-    matmodel.load_state_dict(torch.load(args.checkpoint_matting,map_location='cpu')['model'])
-    matmodel=matmodel.cuda()
-    matmodel.eval()
+    # matmodel = model.AEMatter()
+    # matmodel.load_state_dict(torch.load(args.checkpoint_matting,map_location='cpu')['model'])
+    # matmodel=matmodel.cuda()
+    # matmodel.eval()
 
     root = tk.Tk()
     root.minsize(960, 480)
-    app = InteractiveDemoApp(root, args, c2t_model, matmodel)
+    # app = InteractiveDemoApp(root, args, c2t_model, matmodel)
+    app = InteractiveDemoApp(root, args, None, None)
+    # app = InteractiveDemoApp(root, args, c2t_model, None)
     root.deiconify()
     app.mainloop()
 

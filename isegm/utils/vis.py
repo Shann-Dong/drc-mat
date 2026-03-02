@@ -121,17 +121,22 @@ def draw_with_blend_and_clicks(img, mask=None, alpha=0.6, clicks_list=None, pos_
 
     if mask is not None:
 
-        mask = (mask[0] * 0 + mask[1] * 1 + mask[2] * 2)        
-        mask = mask.squeeze()
+        if mask.shape[0] == 4:
+            mask_idx = mask[0] * 0 + mask[1] * 1 + mask[2] * 2 + mask[3] * 3
+        else:
+            mask_idx = mask[0] * 0 + mask[1] * 1 + mask[2] * 2
+            
+        mask_idx = mask_idx.squeeze()
 
         palette = np.array([[0,0,0],
                     [0,128,0],
-                    [128,0,0]])
+                    [128,0,0],
+                    [0,0,255]]) # 4th color is blue for scribbled background
         
-        assert mask.max() < 3
+        assert mask_idx.max() < 4
 
-        rgb_mask = palette[mask.astype(np.uint8)]
-        mask_region = (mask > 0).astype(np.uint8)
+        rgb_mask = palette[mask_idx.astype(np.uint8)]
+        mask_region = (mask_idx > 0).astype(np.uint8)
         result = result * (1 - mask_region[:, :, np.newaxis]) + \
                 (1 - alpha) * mask_region[:, :, np.newaxis] * result + \
                 alpha * rgb_mask

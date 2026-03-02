@@ -30,7 +30,7 @@ class InteractiveDemoApp(ttk.Frame):
                                                 predictor_params={'brs_mode': 'NoBRS'},
                                                 update_image_callback=self._update_image)
 
-        self.controller.matting_model = matting_model
+        # self.controller.matting_model = matting_model
 
         self._init_state()
         self._add_menu()
