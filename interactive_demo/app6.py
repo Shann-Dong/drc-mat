@@ -269,7 +269,7 @@ class InteractiveDemoApp(ttk.Frame):
         scribble_ctrl_frame.pack(side=tk.TOP, fill=tk.X, pady=10, padx=10)
         tk.Label(scribble_ctrl_frame, text="涂鸦操作:", bg=self.bg_panel, fg=self.color_text, font=self.font_normal).pack(side=tk.LEFT)
         
-        self.undo_scribble_btn = FocusButton(scribble_ctrl_frame, text="撤销涂鸦", command=self.controller.undo_click, state=tk.DISABLED)
+        self.undo_scribble_btn = FocusButton(scribble_ctrl_frame, text="撤销涂鸦", command=self.controller.undo_scribble, state=tk.DISABLED)
         self.undo_scribble_btn.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(10, 5), ipady=2)
         self._style_button(self.undo_scribble_btn, 'warning') # 橙色突出
 
@@ -460,7 +460,7 @@ class InteractiveDemoApp(ttk.Frame):
             self._prev_scribble_y = None
 
     def _update_image(self, reset_canvas=False, backgroung_flag=None):
-        image, alpha, image_source = self.controller.get_visualization(alpha_blend=self.state['alpha_blend'].get(),
+        image, trimap, image_source = self.controller.get_visualization(alpha_blend=self.state['alpha_blend'].get(),
                                                   click_radius=self.state['click_radius'].get())
 
         if self.image_on_canvas is None:
@@ -477,20 +477,29 @@ class InteractiveDemoApp(ttk.Frame):
         if image is not None:
             self.image_on_canvas.reload_image(Image.fromarray(image), reset_canvas)
             
-        if alpha is not None:
-            frame_new = alpha[:,:,0]
-            self.trimap_on_canvas.reload_image(Image.fromarray(frame_new), reset_canvas)
+        if trimap is not None:
+            self.trimap_on_canvas.reload_image(Image.fromarray(trimap), reset_canvas)
         else:
-            black = np.zeros_like(image) if image is not None else np.zeros((400, 800, 3), dtype=np.uint8)
+            black = np.zeros((400, 800), dtype=np.uint8) if image is None else np.zeros(image.shape[:2], dtype=np.uint8)
             self.trimap_on_canvas.reload_image(Image.fromarray(black), reset_canvas)
     
     def _set_click_dependent_widgets_state(self):
-        after_1st_click_state = tk.NORMAL if self.controller.is_incomplete_mask else tk.DISABLED
+        # 点击相关按钮：基于点击历史
+        has_click_history = len(self.controller.click_probs_history) > 0
+        click_state = tk.NORMAL if has_click_history else tk.DISABLED
+        
+        # 涂鸦相关按钮：基于涂鸦历史
+        has_scribble_history = len(self.controller.scribble_probs_history) > 0
+        scribble_state = tk.NORMAL if has_scribble_history else tk.DISABLED
+        
+        # 任何历史存在时启用重置按钮
+        has_any_history = has_click_history or has_scribble_history
+        reset_state = tk.NORMAL if has_any_history else tk.DISABLED
 
-        self.undo_click_btn.configure(state=after_1st_click_state)
-        self.reset_click_btn.configure(state=after_1st_click_state)
-        self.undo_scribble_btn.configure(state=after_1st_click_state)
-        self.reset_scribble_btn.configure(state=after_1st_click_state)
+        self.undo_click_btn.configure(state=click_state)
+        self.reset_click_btn.configure(state=reset_state)
+        self.undo_scribble_btn.configure(state=scribble_state)
+        self.reset_scribble_btn.configure(state=reset_state)
 
     def _check_entry(self, widget):
         all_checked = True

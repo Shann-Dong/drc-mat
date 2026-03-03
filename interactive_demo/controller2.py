@@ -54,8 +54,10 @@ class InteractiveController:
         self.net = net
         self.prob_thresh = prob_thresh
         self.clicker = clicker.Clicker()
-        self.states = []
-        self.probs_history = []
+        self.click_states = []
+        self.scribble_states = []
+        self.click_probs_history = []
+        self.scribble_probs_history = []
         self.object_count = 0
         self._result_mask = None
         self._init_mask = None
@@ -88,52 +90,55 @@ class InteractiveController:
         self.clicker.click_indx_offset = 1
 
     def add_click(self, x, y, flag):
-        self.states.append({
+        self.click_states.append({
             'clicker': self.clicker.get_state(),
             'predictor': self.predictor.get_states()
         })
 
         click = clicker.Click(flag=flag, coords=(y, x))
         self.clicker.add_click(click)
-        # time1 = time.time()
         pred = self.predictor.get_prediction(self.clicker, prev_mask=self._init_mask)
-        # print('time_Clik2Trimap:',time.time()-time1)
 
         if self._init_mask is not None and len(self.clicker) == 1:
             pred = self.predictor.get_prediction(self.clicker, prev_mask=self._init_mask)
 
-
         torch.cuda.empty_cache()
 
-        if self.probs_history:
-            self.probs_history.append((self.probs_history[-1][0], pred))
+        if self.click_probs_history:
+            self.click_probs_history.append((self.click_probs_history[-1][0], pred))
         else:
-            self.probs_history.append((np.zeros_like(pred), pred))
+            self.click_probs_history.append((np.zeros_like(pred), pred))
 
         self.update_image_callback()
 
     def start_scribble(self):
-        if not self.probs_history:
-            pred = np.zeros((3, self.image.shape[0], self.image.shape[1]), dtype=np.float32)
-            pred[0, :, :] = 1000 # default background
-            self.probs_history.append((np.zeros_like(pred), pred))
-            self.states.append({
-                'clicker': self.clicker.get_state(),
-                'predictor': self.predictor.get_states()
-            })
+        # 使用涂鸦专用历史记录
+        if not self.scribble_probs_history:
+            # 检查是否有点击历史，如果有则基于点击结果
+            if self.click_probs_history:
+                # 拷贝点击的完整状态：累积概率(total)和增量概率(additive)
+                click_total = self.click_probs_history[-1][0].copy()
+                click_additive = self.click_probs_history[-1][1].copy()
+                self.scribble_probs_history.append((click_total, click_additive))
+            else:
+                pred = np.zeros((3, self.image.shape[0], self.image.shape[1]), dtype=np.float32)
+                pred[0, :, :] = 1000 # default background
+                self.scribble_probs_history.append((np.zeros_like(pred), pred))
         else:
-            current_prob_total, current_prob_additive = self.probs_history[-1]
-            self.probs_history.append((current_prob_total.copy(), current_prob_additive.copy()))
-            self.states.append({
-                'clicker': self.clicker.get_state(),
-                'predictor': self.predictor.get_states()
-            })
+            current_prob_total, current_prob_additive = self.scribble_probs_history[-1]
+            self.scribble_probs_history.append((current_prob_total.copy(), current_prob_additive.copy()))
+        
+        self.scribble_states.append({
+            'clicker': self.clicker.get_state(),
+            'predictor': self.predictor.get_states()
+        })
 
     def add_scribble(self, x, y, area_type, radius, prev_x=None, prev_y=None):
-        if not self.probs_history:
+        if not self.scribble_probs_history:
             return
         
-        current_prob_total, current_prob_additive = self.probs_history[-1]
+        # 使用涂鸦专用历史记录
+        current_prob_total, current_prob_additive = self.scribble_probs_history[-1]
         
         H, W = current_prob_additive.shape[1:]
         
@@ -168,15 +173,25 @@ class InteractiveController:
         self.update_image_callback()
 
     def undo_click(self):
-        if not self.states:
+        """仅撤销点击，不撤销涂鸦"""
+        if not self.click_states:
             return
 
-        prev_state = self.states.pop()
+        prev_state = self.click_states.pop()
         self.clicker.set_state(prev_state['clicker'])
         self.predictor.set_states(prev_state['predictor'])
-        self.probs_history.pop()
-        if not self.probs_history:
+        self.click_probs_history.pop()
+        if not self.click_probs_history:
             self.reset_init_mask()
+        self.update_image_callback()
+
+    def undo_scribble(self):
+        """仅撤销涂鸦，不撤销点击"""
+        if not self.scribble_states:
+            return
+
+        prev_state = self.scribble_states.pop()
+        self.scribble_probs_history.pop()
         self.update_image_callback()
 
     def change_background_1(self):
@@ -193,8 +208,13 @@ class InteractiveController:
         if object_prob is None:
             return
 
-        self.probs_history.append((object_prob, np.zeros_like(object_prob)))
-        self.states.append(self.states[-1])
+        # 使用当前的历史记录类型
+        if self.scribble_probs_history:
+            self.scribble_probs_history.append((object_prob, np.zeros_like(object_prob)))
+            self.scribble_states.append(self.scribble_states[-1])
+        else:
+            self.click_probs_history.append((object_prob, np.zeros_like(object_prob)))
+            self.click_states.append(self.click_states[-1])
 
         self.clicker.reset_clicks()
         self.reset_predictor()
@@ -210,8 +230,10 @@ class InteractiveController:
         self.reset_last_object()
 
     def reset_last_object(self, update_image=True):
-        self.states = []
-        self.probs_history = []
+        self.click_states = []
+        self.scribble_states = []
+        self.click_probs_history = []
+        self.scribble_probs_history = []
         self.clicker.reset_clicks()
         self.reset_predictor()
         self.reset_init_mask()
@@ -231,25 +253,42 @@ class InteractiveController:
         self.clicker.click_indx_offset = 0
 
     @property
+    def probs_history(self):
+        """合并点击和涂鸦的历史记录用于显示"""
+        if self.scribble_probs_history:
+            return self.scribble_probs_history
+        return self.click_probs_history
+
+    @property
+    def states(self):
+        """合并点击和涂鸦的状态用于兼容"""
+        if self.scribble_states:
+            return self.scribble_states
+        return self.click_states
+
+    @property
     def current_object_prob(self):
-        if self.probs_history:
-            current_prob_total, current_prob_additive = self.probs_history[-1]
-
-            fore_mask = current_prob_additive.argmax(axis=0) == 2
-            uk_mask = current_prob_additive.argmax(axis=0) == 1
-            back_mask = current_prob_additive.argmax(axis=0) == 0
-
-            scribbled_back_mask = (current_prob_additive[0] == 1000) & (current_prob_additive[1] == -1000)
-            back_mask = back_mask & (~scribbled_back_mask)
-
-            pred_mask = np.stack([back_mask, uk_mask, fore_mask, scribbled_back_mask]).astype(np.uint8)
-            return pred_mask
+        # 使用涂鸦历史或点击历史
+        if self.scribble_probs_history:
+            current_prob_total, current_prob_additive = self.scribble_probs_history[-1]
+        elif self.click_probs_history:
+            current_prob_total, current_prob_additive = self.click_probs_history[-1]
         else:
             return None
 
+        fore_mask = current_prob_additive.argmax(axis=0) == 2
+        uk_mask = current_prob_additive.argmax(axis=0) == 1
+        back_mask = current_prob_additive.argmax(axis=0) == 0
+
+        scribbled_back_mask = (current_prob_additive[0] == 1000) & (current_prob_additive[1] == -1000)
+        back_mask = back_mask & (~scribbled_back_mask)
+
+        pred_mask = np.stack([back_mask, uk_mask, fore_mask, scribbled_back_mask]).astype(np.uint8)
+        return pred_mask
+
     @property
     def is_incomplete_mask(self):
-        return len(self.probs_history) > 0
+        return len(self.click_probs_history) > 0 or len(self.scribble_probs_history) > 0
 
     @property
     def result_mask(self):
@@ -261,7 +300,7 @@ class InteractiveController:
         if self.image is None:
             return None
 
-        alpha = None
+        trimap = None
 
         results_mask_for_vis = self.result_mask
         vis = draw_with_blend_and_clicks(self.image, mask=results_mask_for_vis, alpha=alpha_blend,
@@ -269,7 +308,6 @@ class InteractiveController:
 
         if results_mask_for_vis is not None:
             trimap = results_mask_for_vis[0] * 0 + results_mask_for_vis[1] * 128 + results_mask_for_vis[2] * 255
-
 
         if self.probs_history:
             total_mask = self.probs_history[-1][0] > self.prob_thresh
@@ -284,6 +322,6 @@ class InteractiveController:
                 alpha = None
             
             self.alpha_save = alpha
-            self.trimap_save = trimap
-
-        return vis, alpha, self.image
+        
+        self.trimap_save = trimap
+        return vis, trimap, self.image

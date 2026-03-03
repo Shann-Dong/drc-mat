@@ -110,9 +110,9 @@ class Generator_MatteFormer(nn.Module):
 def main():
     args = parse_args()
 
-    # torch.backends.cudnn.deterministic = True
-    # checkpoint_path = utils.find_checkpoint('.', args.checkpoint_c2t)
-    # c2t_model = utils.load_is_model(checkpoint_path, args.device, args.eval_ritm, cpu_dist_maps=True)
+    torch.backends.cudnn.deterministic = True
+    checkpoint_path = utils.find_checkpoint('.', args.checkpoint_c2t)
+    c2t_model = utils.load_is_model(checkpoint_path, args.device, args.eval_ritm, cpu_dist_maps=True)
 
 
 
@@ -130,8 +130,8 @@ def main():
     root = tk.Tk()
     root.minsize(960, 480)
     # app = InteractiveDemoApp(root, args, c2t_model, matmodel)
-    app = InteractiveDemoApp(root, args, None, None)
-    # app = InteractiveDemoApp(root, args, c2t_model, None)
+    # app = InteractiveDemoApp(root, args, None, None)
+    app = InteractiveDemoApp(root, args, c2t_model, None)
     root.deiconify()
     app.mainloop()
 
@@ -139,7 +139,7 @@ def main():
 def parse_args():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--checkpoint-c2t', type=str, default ='weights\click2trimap.pth',
+    parser.add_argument('--checkpoint-c2t', type=str, default ='/Users/shann/code/Click2Trimap/weights/click2trimap.pth',
                         help='The path to the checkpoint. '
                              'This can be a relative path (relative to cfg.INTERACTIVE_MODELS_PATH) '
                              'or an absolute path. The file extension can be omitted.')
