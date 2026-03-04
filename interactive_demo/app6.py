@@ -330,15 +330,17 @@ class InteractiveDemoApp(ttk.Frame):
             ], title="选择文件")
 
             if len(filename) > 0:
+                # 记录加载的文件名和原始图像
+                self.current_filename = filename
                 image = cv2.cvtColor(cv2.imread(filename), cv2.COLOR_BGR2RGB)
                 if image is not None:
                     self.canvas.delete("placeholder")
                     self.canvas_trimap.delete("placeholder")
+                    self.canvas_video.delete("placeholder")
+                    self.canvas_result.delete("placeholder")
                     
-                    # # 检查模型是否加载
-                    # if self.c2t_model is None:
-                    #     messagebox.showwarning("警告", "请先加载 Click2Trimap 模型！")
-                    #     return
+                    # 保存原始图像用于视频预览
+                    self.original_image = image
                     
                     self.controller.set_image(image)
                     self.save_mask_btn.configure(state=tk.NORMAL)
@@ -373,6 +375,44 @@ class InteractiveDemoApp(ttk.Frame):
                 ("AVI 视频", "*.avi"),
                 ("所有文件", "*.*"),
             ], title="保存结果视频为...")
+
+    def _load_original_image(self):
+        """加载原始图片到视频预览区域"""
+        self.menubar.focus_set()
+        filename = filedialog.askopenfilename(parent=self.master, filetypes=[
+            ("图像文件", "*.jpg *.jpeg *.png *.bmp *.tiff *.tif"),
+            ("所有文件", "*.*"),
+        ], title="选择原始图片")
+
+        if len(filename) > 0:
+            image = cv2.cvtColor(cv2.imread(filename), cv2.COLOR_BGR2RGB)
+            if image is not None:
+                self.canvas_video.delete("placeholder")
+                self.original_image = image
+                
+                # 初始化画布并显示图片
+                if not hasattr(self, 'video_on_canvas') or self.video_on_canvas is None:
+                    self.video_on_canvas = CanvasImage(self.canvas_frame_video, self.canvas_video)
+                self.video_on_canvas.reload_image(Image.fromarray(image), reset_canvas=False)
+
+    def _load_result_image(self):
+        """加载抠图结果图片到结果预览区域"""
+        self.menubar.focus_set()
+        filename = filedialog.askopenfilename(parent=self.master, filetypes=[
+            ("图像文件", "*.jpg *.jpeg *.png *.bmp *.tiff *.tif"),
+            ("所有文件", "*.*"),
+        ], title="选择结果图片")
+
+        if len(filename) > 0:
+            image = cv2.cvtColor(cv2.imread(filename), cv2.COLOR_BGR2RGB)
+            if image is not None:
+                self.canvas_result.delete("placeholder")
+                self.result_image = image
+                
+                # 初始化画布并显示图片
+                if not hasattr(self, 'result_on_canvas') or self.result_on_canvas is None:
+                    self.result_on_canvas = CanvasImage(self.canvas_frame_result, self.canvas_result)
+                self.result_on_canvas.reload_image(Image.fromarray(image), reset_canvas=False)
 
     def _reset_last_object(self):
         self.state['alpha_blend'].set(0.5)
@@ -473,10 +513,25 @@ class InteractiveDemoApp(ttk.Frame):
             self.trimap_on_canvas.register_click_callback(self._click_callback)
             self.trimap_on_canvas.register_scribble_callbacks(self._scribble_callback, self._scribble_release_callback)
 
+        # 初始化视频预览和结果预览画布
+        if not hasattr(self, 'video_on_canvas') or self.video_on_canvas is None:
+            self.video_on_canvas = CanvasImage(self.canvas_frame_video, self.canvas_video)
+        if not hasattr(self, 'result_on_canvas') or self.result_on_canvas is None:
+            self.result_on_canvas = CanvasImage(self.canvas_frame_result, self.canvas_result)
+
         self._set_click_dependent_widgets_state()
         if image is not None:
             self.image_on_canvas.reload_image(Image.fromarray(image), reset_canvas)
             
+        # 更新视频预览区域（显示原始图像）
+        if hasattr(self, 'original_image') and self.original_image is not None:
+            self.video_on_canvas.reload_image(Image.fromarray(self.original_image), reset_canvas)
+            
+        # 更新结果预览区域（显示命令行传入的结果图片）
+        if hasattr(self, 'result_image') and self.result_image is not None:
+            self.result_on_canvas.reload_image(Image.fromarray(self.result_image), reset_canvas)
+        
+        # 更新三分图画布
         if trimap is not None:
             self.trimap_on_canvas.reload_image(Image.fromarray(trimap), reset_canvas)
         else:

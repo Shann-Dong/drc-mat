@@ -133,6 +133,19 @@ def main():
     # app = InteractiveDemoApp(root, args, None, None)
     app = InteractiveDemoApp(root, args, c2t_model, None)
     root.deiconify()
+    
+    # 如果指定了结果图片路径，加载并显示
+    if args.result_image and os.path.exists(args.result_image):
+        import cv2
+        result_img = cv2.cvtColor(cv2.imread(args.result_image), cv2.COLOR_BGR2RGB)
+        app.result_image = result_img
+        # 初始化结果预览画布并显示
+        if not hasattr(app, 'result_on_canvas') or app.result_on_canvas is None:
+            from interactive_demo.canvas2 import CanvasImage
+            app.result_on_canvas = CanvasImage(app.canvas_frame_result, app.canvas_result)
+        from PIL import Image
+        app.result_on_canvas.reload_image(Image.fromarray(result_img), reset_canvas=False)
+    
     app.mainloop()
 
 
@@ -163,6 +176,9 @@ def parse_args():
                         help='The path to the config file.')
 
     parser.add_argument('--eval-ritm', action='store_true', default=False)
+
+    parser.add_argument('--result-image', type=str, default='',
+                        help='Path to result image to display in result preview area.')
 
     args = parser.parse_args()
     if args.cpu:
