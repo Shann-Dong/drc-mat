@@ -139,7 +139,7 @@ def main():
 def parse_args():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--checkpoint-c2t', type=str, default ='/Users/shann/code/Click2Trimap/weights/click2trimap.pth',
+    parser.add_argument('--checkpoint-c2t', type=str, default ='./weights/click2trimap.pth',
                         help='The path to the checkpoint. '
                              'This can be a relative path (relative to cfg.INTERACTIVE_MODELS_PATH) '
                              'or an absolute path. The file extension can be omitted.')
