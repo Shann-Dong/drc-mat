@@ -2,10 +2,14 @@
 
 import tkinter as tk
 from tkinter import messagebox, filedialog, ttk
+import threading
+import os
+import uuid
+from pathlib import Path
 
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageTk
 
 from interactive_demo.canvas2 import CanvasImage
 from interactive_demo.controller2 import InteractiveController
@@ -52,6 +56,19 @@ class InteractiveDemoApp(ttk.Frame):
         self.state['zoomin_params']['target_size'].trace(mode='w', callback=self._reset_predictor)
         self.state['zoomin_params']['expansion_ratio'].trace(mode='w', callback=self._reset_predictor)
         self._reset_predictor()
+
+        # 视频相关状态
+        self.video_capture = None  # cv2.VideoCapture 对象
+        self.video_path = None  # 当前视频路径
+        self.video_frames = []  # 视频帧列表
+        self.current_frame_index = 0  # 当前帧索引
+        self.is_playing = False  # 播放状态
+        self.video_play_thread = None  # 视频播放线程
+        self.frames_folder = None  # 视频拆帧保存文件夹
+        self.video_photo = None  # 视频预览区域的 PhotoImage 对象
+        self.result_photo = None  # 结果预览区域的 PhotoImage 对象
+        self.progress_window = None  # 进度条窗口
+        self.video_fps = 30  # 视频帧率
         
         self._is_scribbling = False
         self._prev_scribble_x = None
@@ -165,7 +182,7 @@ class InteractiveDemoApp(ttk.Frame):
         self.main_frame.rowconfigure(0, weight=1, minsize=270, uniform='row')
         self.main_frame.rowconfigure(1, weight=1, minsize=270, uniform='row')
         self.main_frame.columnconfigure(0, weight=1, minsize=480, uniform='canvas_col') #图像画布/视频预览 minsize最小宽度
-        self.main_frame.columnconfigure(1, weight=1, minsize=480, uniform='canvas_col') #三分图画布/结果预览 #todo 改了大小 测试下
+        self.main_frame.columnconfigure(1, weight=1, minsize=480, uniform='canvas_col') #三分图画布/结果预览 
         self.main_frame.columnconfigure(2, weight=0, minsize=340)
 
         # 第 1 行
@@ -292,11 +309,11 @@ class InteractiveDemoApp(ttk.Frame):
         v_play_frame = tk.Frame(self.video_ctrl_frame, bg=self.bg_panel)
         v_play_frame.pack(side=tk.TOP, fill=tk.X, pady=10, padx=15)
         
-        btn_v_play = FocusButton(v_play_frame, text="▶ 视频播放")
+        btn_v_play = FocusButton(v_play_frame, text="▶ 视频播放", command=self._play_video)
         btn_v_play.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5, ipady=4)
         self._style_button(btn_v_play, 'primary') # 蓝色突出
 
-        btn_v_pause = FocusButton(v_play_frame, text="⏸ 视频暂停")
+        btn_v_pause = FocusButton(v_play_frame, text="⏸ 视频暂停", command=self._pause_video)
         btn_v_pause.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5, ipady=4)
         self._style_button(btn_v_pause, 'warning') # 橙色突出
 
@@ -330,19 +347,28 @@ class InteractiveDemoApp(ttk.Frame):
             ], title="选择文件")
 
             if len(filename) > 0:
-                image = cv2.cvtColor(cv2.imread(filename), cv2.COLOR_BGR2RGB)
-                if image is not None:
-                    self.canvas.delete("placeholder")
-                    self.canvas_trimap.delete("placeholder")
-                    
-                    # # 检查模型是否加载
-                    # if self.c2t_model is None:
-                    #     messagebox.showwarning("警告", "请先加载 Click2Trimap 模型！")
-                    #     return
-                    
-                    self.controller.set_image(image)
-                    self.save_mask_btn.configure(state=tk.NORMAL)
-                    self.save_video_btn.configure(state=tk.NORMAL)
+                # 判断是视频文件还是图像文件
+                file_ext = os.path.splitext(filename)[1].lower()
+                video_exts = ['.mp4', '.avi', '.mov']
+                
+                if file_ext in video_exts:
+                    # 处理视频文件
+                    self._load_video_file(filename)
+                else:
+                    # 处理图像文件
+                    image = cv2.cvtColor(cv2.imread(filename), cv2.COLOR_BGR2RGB)
+                    if image is not None:
+                        self.canvas.delete("placeholder")
+                        self.canvas_trimap.delete("placeholder")
+                        
+                        # 检查模型是否加载
+                        if self.c2t_model is None:
+                            messagebox.showwarning("警告", "请先加载 Click2Trimap 模型！")
+                            return
+                        
+                        self.controller.set_image(image)
+                        self.save_mask_btn.configure(state=tk.NORMAL)
+                        self.save_video_btn.configure(state=tk.NORMAL)
 
     def _save_mask_callback(self):
         self.menubar.focus_set()
@@ -511,5 +537,234 @@ class InteractiveDemoApp(ttk.Frame):
             all_checked = all_checked and widget._check_bounds(widget.get(), '-1')
 
         return all_checked
+
+    # ==================== 视频处理相关方法 ====================
+    
+    def _load_video_file(self, video_path):
+        """加载视频文件并启动拆帧处理"""
+        # 检查模型是否加载
+        if self.c2t_model is None:
+            messagebox.showwarning("警告", "请先加载 Click2Trimap 模型！")
+            return
+        
+        self.video_path = video_path
+        self.video_capture = cv2.VideoCapture(video_path)
+        
+        if not self.video_capture.isOpened():
+            messagebox.showerror("错误", "无法打开视频文件！")
+            return
+        
+        # 获取视频总帧数
+        total_frames = int(self.video_capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames <= 0:
+            messagebox.showerror("错误", "无法获取视频帧数！")
+            return
+        
+        # 获取视频FPS
+        fps = self.video_capture.get(cv2.CAP_PROP_FPS)
+        self.video_fps = int(fps) if fps > 0 else 30
+        
+        # 创建拆帧保存目录
+        video_name = os.path.splitext(os.path.basename(video_path))[0]
+        unique_id = str(uuid.uuid4())[:8]
+        self.frames_folder = os.path.join('trimap_video_frames', f'{video_name}_{unique_id}')
+        os.makedirs(self.frames_folder, exist_ok=True)
+        
+        # 创建进度条窗口
+        self._create_progress_window(total_frames)
+        
+        # 释放当前捕获对象，在后台线程中重新打开
+        self.video_capture.release()
+        
+        # 在后台线程中进行拆帧处理
+        thread = threading.Thread(target=self._extract_video_frames, 
+                                   args=(video_path, total_frames, unique_id))
+        thread.daemon = True
+        thread.start()
+
+    def _create_progress_window(self, total_frames):
+        """创建进度条窗口"""
+        # 先隐藏进度条窗口如果已存在
+        if hasattr(self, 'progress_window') and self.progress_window is not None:
+            try:
+                self.progress_window.destroy()
+            except:
+                pass
+        
+        # 创建进度条窗口
+        self.progress_window = tk.Toplevel(self.master)
+        self.progress_window.title("视频拆帧处理")
+        self.progress_window.geometry("400x120")
+        self.progress_window.resizable(False, False)
+        
+        # 居中显示
+        self.progress_window.transient(self.master)
+        self.progress_window.grab_set()
+        
+        # 进度条框架
+        progress_frame = tk.Frame(self.progress_window, bg=self.bg_panel)
+        progress_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # 提示标签
+        self.progress_label = tk.Label(progress_frame, text="正在拆帧: 0/{0}".format(total_frames),
+                                       bg=self.bg_panel, fg=self.color_text, font=self.font_normal)
+        self.progress_label.pack(pady=(0, 10))
+        
+        # 进度条
+        self.progress_bar = ttk.Progressbar(progress_frame, mode='determinate', length=350)
+        self.progress_bar.pack()
+        self.progress_bar['maximum'] = total_frames
+        self.progress_bar['value'] = 0
+        
+        # 百分比标签
+        self.progress_percent = tk.Label(progress_frame, text="0%",
+                                         bg=self.bg_panel, fg=self.color_text, font=self.font_normal)
+        self.progress_percent.pack(pady=(10, 0))
+
+    def _extract_video_frames(self, video_path, total_frames, unique_id):
+        """在后台线程中提取视频帧并保存"""
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            self.master.after(0, lambda: messagebox.showerror("错误", "无法打开视频文件！"))
+            return
+        
+        self.video_frames = []
+        frames_saved = []
+        
+        for i in range(total_frames):
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            # BGR 转 RGB
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            self.video_frames.append(frame_rgb)
+            
+            # 保存帧到文件
+            frame_filename = os.path.join(self.frames_folder, f'frame_{i:06d}.png')
+            cv2.imwrite(frame_filename, cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR))
+            frames_saved.append(frame_filename)
+            
+            # 更新进度条（每10帧更新一次以减少UI负担）
+            if i % 10 == 0 or i == total_frames - 1:
+                self.master.after(0, lambda idx=i: self._update_progress(idx + 1, total_frames))
+        
+        cap.release()
+        
+        # 拆帧完成后在主线程中更新UI
+        self.master.after(0, lambda: self._on_frames_extracted(frames_saved))
+
+    def _update_progress(self, current, total):
+        """更新进度条显示"""
+        if hasattr(self, 'progress_bar') and self.progress_bar is not None:
+            self.progress_bar['value'] = current
+            percent = int(current / total * 100)
+            if hasattr(self, 'progress_label'):
+                self.progress_label.config(text="正在拆帧: {0}/{1}".format(current, total))
+            if hasattr(self, 'progress_percent'):
+                self.progress_percent.config(text="{0}%".format(percent))
+            self.progress_window.update()
+
+    def _on_frames_extracted(self, frames_saved):
+        """帧提取完成后的回调"""
+        # 关闭进度条窗口
+        if hasattr(self, 'progress_window') and self.progress_window is not None:
+            try:
+                self.progress_window.destroy()
+            except:
+                pass
+            self.progress_window = None
+        
+        if len(self.video_frames) == 0:
+            messagebox.showerror("错误", "视频帧提取失败！")
+            return
+        
+        # 在图像画布显示第一帧
+        first_frame = self.video_frames[0]
+        self.canvas.delete("placeholder")
+        self.canvas_trimap.delete("placeholder")
+        self.controller.set_image(first_frame)
+        
+        # 在视频预览区域显示第一帧
+        self._display_video_frame(0)
+        
+        # 启用保存按钮
+        self.save_mask_btn.configure(state=tk.NORMAL)
+        self.save_video_btn.configure(state=tk.NORMAL)
+        
+        # 显示完成消息
+        messagebox.showinfo("完成", "视频拆帧完成！共提取 {0} 帧，保存至: {1}".format(
+            len(self.video_frames), self.frames_folder))
+
+    def _display_video_frame(self, frame_index):
+        """在视频预览区域显示指定帧"""
+        if frame_index >= len(self.video_frames):
+            frame_index = 0
+        
+        self.current_frame_index = frame_index
+        frame = self.video_frames[frame_index]
+        
+        # 调整图像大小以适应画布
+        canvas_width = self.canvas_video.winfo_width()
+        canvas_height = self.canvas_video.winfo_height()
+        
+        if canvas_width <= 1 or canvas_height <= 1:
+            # 画布还未完全渲染，使用默认大小
+            canvas_width = 480
+            canvas_height = 270
+        
+        h, w = frame.shape[:2]
+        scale = min(canvas_width / w, canvas_height / h, 1.0)
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+        
+        # 调整图像大小
+        frame_resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        
+        # 转换为 PhotoImage
+        frame_pil = Image.fromarray(frame_resized)
+        self.video_photo = ImageTk.PhotoImage(frame_pil)
+        
+        # 显示图像
+        self.canvas_video.delete("all")
+        x = (canvas_width - new_w) // 2
+        y = (canvas_height - new_h) // 2
+        self.canvas_video.create_image(x, y, anchor=tk.NW, image=self.video_photo)
+        
+        # 清除占位符
+        self.canvas_video.delete("placeholder")
+
+    def _play_video(self):
+        """播放视频"""
+        if self.video_frames is None or len(self.video_frames) == 0:
+            messagebox.showwarning("提示", "请先加载视频文件！")
+            return
+        
+        if self.is_playing:
+            return
+        
+        self.is_playing = True
+        
+        # 使用之前保存的FPS或默认值
+        fps = self.video_fps if hasattr(self, 'video_fps') and self.video_fps > 0 else 30
+        delay = int(1000 / fps)  # 每帧延迟毫秒数
+        
+        def play_loop():
+            while self.is_playing and self.current_frame_index < len(self.video_frames) - 1:
+                self.current_frame_index += 1
+                self.master.after(0, lambda idx=self.current_frame_index: self._display_video_frame(idx))
+                self.master.after(delay)
+            
+            # 播放完成
+            if self.current_frame_index >= len(self.video_frames) - 1:
+                self.is_playing = False
+        
+        self.video_play_thread = threading.Thread(target=play_loop)
+        self.video_play_thread.daemon = True
+        self.video_play_thread.start()
+
+    def _pause_video(self):
+        """暂停视频播放"""
+        self.is_playing = False
 
 # --- END OF FILE app6.py ---

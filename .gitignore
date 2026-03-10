@@ -140,3 +140,6 @@ pretrained/
 
 sbatch/
 trimap*/
+
+*.mp4
+trimap_video_frames/*
