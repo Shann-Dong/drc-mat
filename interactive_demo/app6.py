@@ -23,7 +23,7 @@ class InteractiveDemoApp(ttk.Frame):
         master.update_idletasks()
         
         # 初始窗口大小与居中
-        master.geometry("1300x850")
+        master.geometry("1400x750")
         x = (master.winfo_screenwidth() - 1300) / 2
         y = (master.winfo_screenheight() - 850) / 2
         master.geometry("+%d+%d" % (x, y))
@@ -162,10 +162,10 @@ class InteractiveDemoApp(ttk.Frame):
         self.main_frame = tk.Frame(self, bg=self.bg_main)
         self.main_frame.pack(fill="both", expand=True, padx=15, pady=15)
         
-        self.main_frame.rowconfigure(0, weight=1)
-        self.main_frame.rowconfigure(1, weight=1)
-        self.main_frame.columnconfigure(0, weight=1, uniform='canvas_col')
-        self.main_frame.columnconfigure(1, weight=1, uniform='canvas_col')
+        self.main_frame.rowconfigure(0, weight=1, minsize=270, uniform='row')
+        self.main_frame.rowconfigure(1, weight=1, minsize=270, uniform='row')
+        self.main_frame.columnconfigure(0, weight=1, minsize=480, uniform='canvas_col') #图像画布/视频预览 minsize最小宽度
+        self.main_frame.columnconfigure(1, weight=1, minsize=480, uniform='canvas_col') #三分图画布/结果预览 #todo 改了大小 测试下
         self.main_frame.columnconfigure(2, weight=0, minsize=340)
 
         # 第 1 行
