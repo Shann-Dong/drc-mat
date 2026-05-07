@@ -3,7 +3,9 @@
 import tkinter as tk
 from tkinter import messagebox, filedialog, ttk
 import threading
+import time
 import os
+import sys
 import uuid
 from pathlib import Path
 
@@ -16,6 +18,11 @@ from interactive_demo.controller2 import InteractiveController
 # from interactive_demo.controller import InteractiveController
 from interactive_demo.wrappers import BoundedNumericalEntry, FocusHorizontalScale, FocusCheckButton, \
     FocusButton, FocusLabelFrame
+
+# ---- OTVM 推理模块路径 ----
+_OTVM_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'OTVM'))
+if _OTVM_DIR not in sys.path:
+    sys.path.insert(0, _OTVM_DIR)
 
 
 class InteractiveDemoApp(ttk.Frame):
@@ -73,6 +80,15 @@ class InteractiveDemoApp(ttk.Frame):
         self._is_scribbling = False
         self._prev_scribble_x = None
         self._prev_scribble_y = None
+
+        # OTVM 推理相关状态
+        self.trimap_folder = None        # 三分图保存目录
+        self.result_video_path = None    # 推理结果视频路径
+        self.result_frames = []          # 结果视频帧列表（RGB）
+        self.result_current_index = 0   # 结果播放当前帧索引
+        self.result_is_playing = False  # 结果播放状态
+        self.result_play_thread = None  # 结果播放线程
+        self.result_photo = None        # 结果预览的 PhotoImage
 
     def _apply_global_style(self):
         """配置全局现代化样式"""
@@ -320,19 +336,22 @@ class InteractiveDemoApp(ttk.Frame):
         r_play_frame = tk.Frame(self.video_ctrl_frame, bg=self.bg_panel)
         r_play_frame.pack(side=tk.TOP, fill=tk.X, pady=10, padx=15)
         
-        btn_r_play = FocusButton(r_play_frame, text="▶ 结果播放")
-        btn_r_play.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5, ipady=4)
-        self._style_button(btn_r_play, 'primary') # 蓝色突出
+        self.btn_r_play = FocusButton(r_play_frame, text="▶ 结果播放",
+                                        command=self._play_result, state=tk.DISABLED)
+        self.btn_r_play.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5, ipady=4)
+        self._style_button(self.btn_r_play, 'primary') # 蓝色突出
 
-        btn_r_pause = FocusButton(r_play_frame, text="⏸ 结果暂停")
-        btn_r_pause.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5, ipady=4)
-        self._style_button(btn_r_pause, 'warning') # 橙色突出
+        self.btn_r_pause = FocusButton(r_play_frame, text="⏸ 结果暂停",
+                                        command=self._pause_result, state=tk.DISABLED)
+        self.btn_r_pause.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5, ipady=4)
+        self._style_button(self.btn_r_pause, 'warning') # 橙色突出
 
         tk.Frame(self.video_ctrl_frame, bg=self.bg_panel).pack(expand=True)
 
         matting_frame = tk.Frame(self.video_ctrl_frame, bg=self.bg_panel)
         matting_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=20, padx=20)
-        btn_start_matting = FocusButton(matting_frame, text="开 始 抠 图")
+        btn_start_matting = FocusButton(matting_frame, text="开 始 抠 图",
+                                        command=self._start_matting_callback)
         btn_start_matting.pack(fill=tk.X, ipady=8)
         self._style_button(btn_start_matting, 'success') # 绿色核心突出
 
@@ -742,7 +761,12 @@ class InteractiveDemoApp(ttk.Frame):
         
         if self.is_playing:
             return
-        
+
+        # 若已播放到末尾，则从头开始
+        if self.current_frame_index >= len(self.video_frames) - 1:
+            self.current_frame_index = 0
+            self.master.after(0, lambda: self._display_video_frame(0))
+
         self.is_playing = True
         
         # 使用之前保存的FPS或默认值
@@ -753,7 +777,7 @@ class InteractiveDemoApp(ttk.Frame):
             while self.is_playing and self.current_frame_index < len(self.video_frames) - 1:
                 self.current_frame_index += 1
                 self.master.after(0, lambda idx=self.current_frame_index: self._display_video_frame(idx))
-                self.master.after(delay)
+                time.sleep(delay / 1000.0)  # 在子线程中用 sleep 控制帧率
             
             # 播放完成
             if self.current_frame_index >= len(self.video_frames) - 1:
@@ -766,5 +790,264 @@ class InteractiveDemoApp(ttk.Frame):
     def _pause_video(self):
         """暂停视频播放"""
         self.is_playing = False
+
+    # ==================== 抠图推理相关方法 ====================
+
+    def _start_matting_callback(self):
+        """「开始抠图」按钮回调：记录路径并在后台线程启动 OTVM 推理。"""
+        # --- 检查前置条件 ---
+        if not self.video_path:
+            messagebox.showwarning("提示", "请先加载视频文件！")
+            return
+        if not self.frames_folder or not os.path.isdir(self.frames_folder):
+            messagebox.showwarning("提示", "视频尚未完成拆帧，请稍候！")
+            return
+
+        # --- 确定三分图目录 ---
+        # 控制器中的 trimap_save 是最后一次生成的三分图（numpy 数组）
+        # 需要将其保存为图像文件；同时为每一帧创建对应三分图
+        # 策略：若用户只针对第 0 帧标注，就将其三分图复制到整个序列的三分图目录
+        trimap_np = getattr(self.controller, 'trimap_save', None)
+        if trimap_np is None:
+            messagebox.showwarning("提示", "请先在图像画布上进行交互标注以生成三分图！")
+            return
+
+        # 创建专属三分图目录（与帧目录同级）
+        self.trimap_folder = self.frames_folder + '_trimap'
+        os.makedirs(self.trimap_folder, exist_ok=True)
+
+        # 获取帧文件列表
+        supported_exts = {'.jpg', '.jpeg', '.png', '.bmp'}
+        frame_files = sorted([
+            f for f in os.listdir(self.frames_folder)
+            if os.path.splitext(f)[1].lower() in supported_exts
+        ])
+        if len(frame_files) == 0:
+            messagebox.showerror("错误", "帧目录中没有图像文件！")
+            return
+
+        # 将当前三分图保存为第一帧对应的 PNG，其余帧同样复制该三分图
+        # （OTVM run_inference 内部会自动 fallback 到已有三分图）
+        first_stem = os.path.splitext(frame_files[0])[0]
+        first_trimap_path = os.path.join(self.trimap_folder, first_stem + '.png')
+        cv2.imwrite(first_trimap_path, trimap_np)
+
+        # 记录关键路径供日志/调试使用
+        print('[抠图] 输入视频路径   :', self.video_path)
+        print('[抠图] 视频帧目录     :', self.frames_folder)
+        print('[抠图] 三分图目录     :', self.trimap_folder)
+        print('[抠图] 三分图（首帧） :', first_trimap_path)
+
+        # 确定推理输出目录（与帧目录同父目录）
+        output_dir = self.frames_folder + '_otvm_result'
+        os.makedirs(output_dir, exist_ok=True)
+
+        # --- 创建推理进度条窗口 ---
+        total_frames = len(frame_files)
+        self._create_inference_progress_window(total_frames)
+
+        # --- 在后台线程启动推理 ---
+        thread = threading.Thread(
+            target=self._run_otvm_inference,
+            args=(self.frames_folder, self.trimap_folder, output_dir, total_frames),
+            daemon=True
+        )
+        thread.start()
+
+    def _create_inference_progress_window(self, total_frames):
+        """创建 OTVM 推理进度条弹窗。"""
+        if hasattr(self, '_infer_progress_win') and self._infer_progress_win is not None:
+            try:
+                self._infer_progress_win.destroy()
+            except Exception:
+                pass
+
+        self._infer_progress_win = tk.Toplevel(self.master)
+        self._infer_progress_win.title("OTVM 推理中")
+        self._infer_progress_win.geometry("420x130")
+        self._infer_progress_win.resizable(False, False)
+        self._infer_progress_win.transient(self.master)
+        self._infer_progress_win.grab_set()
+
+        frame = tk.Frame(self._infer_progress_win, bg=self.bg_panel)
+        frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        self._infer_label = tk.Label(frame,
+                                     text="正在推理: 0/{}".format(total_frames),
+                                     bg=self.bg_panel, fg=self.color_text,
+                                     font=self.font_normal)
+        self._infer_label.pack(pady=(0, 8))
+
+        self._infer_bar = ttk.Progressbar(frame, mode='determinate', length=370)
+        self._infer_bar.pack()
+        self._infer_bar['maximum'] = total_frames
+        self._infer_bar['value'] = 0
+
+        self._infer_percent = tk.Label(frame, text="0%",
+                                       bg=self.bg_panel, fg=self.color_text,
+                                       font=self.font_normal)
+        self._infer_percent.pack(pady=(8, 0))
+
+    def _update_inference_progress(self, current, total):
+        """在主线程中更新推理进度条（由后台线程通过 master.after 调度）。"""
+        if hasattr(self, '_infer_bar') and self._infer_bar is not None:
+            self._infer_bar['value'] = current
+            pct = int(current / total * 100)
+            if hasattr(self, '_infer_label'):
+                self._infer_label.config(text="正在推理: {}/{}".format(current, total))
+            if hasattr(self, '_infer_percent'):
+                self._infer_percent.config(text="{}%".format(pct))
+            try:
+                self._infer_progress_win.update()
+            except Exception:
+                pass
+
+    def _run_otvm_inference(self, frames_folder, trimap_folder, output_dir, total_frames):
+        """后台线程：调用 OTVM run_inference 完成推理，完成后回调主线程。"""
+        try:
+            # 动态导入 OTVM eval 模块
+            import importlib
+            import eval as otvm_eval
+            importlib.reload(otvm_eval)   # 确保使用最新代码
+
+            def _progress(cur, tot):
+                self.master.after(0, lambda c=cur, t=tot: self._update_inference_progress(c, t))
+
+            result_video_path, alpha_dir = otvm_eval.run_inference(
+                frames_folder=frames_folder,
+                trimap_folder=trimap_folder,
+                output_dir=output_dir,
+                gpu='0',
+                progress_callback=_progress,
+            )
+
+            # 推理完成，回调主线程
+            self.master.after(0, lambda: self._on_inference_done(result_video_path))
+
+        except Exception as e:
+            import traceback
+            err_msg = traceback.format_exc()
+            self.master.after(0, lambda msg=err_msg: self._on_inference_error(msg))
+
+    def _on_inference_done(self, result_video_path):
+        """推理完成后的主线程回调：关闭进度窗口、加载结果视频帧、启用播放按钮。"""
+        # 关闭进度窗口
+        if hasattr(self, '_infer_progress_win') and self._infer_progress_win is not None:
+            try:
+                self._infer_progress_win.destroy()
+            except Exception:
+                pass
+            self._infer_progress_win = None
+
+        if not result_video_path or not os.path.isfile(result_video_path):
+            messagebox.showerror("错误", "推理完成但结果视频未生成！")
+            return
+
+        self.result_video_path = result_video_path
+        print('[抠图] 结果视频路径:', result_video_path)
+
+        # 加载结果视频帧到内存
+        self._load_result_video_frames(result_video_path)
+
+    def _on_inference_error(self, err_msg):
+        """推理失败的主线程回调。"""
+        if hasattr(self, '_infer_progress_win') and self._infer_progress_win is not None:
+            try:
+                self._infer_progress_win.destroy()
+            except Exception:
+                pass
+            self._infer_progress_win = None
+        print('[抠图] 推理出错:\n', err_msg)
+        messagebox.showerror("推理失败", "OTVM 推理出错，详情请查看控制台。\n\n" + err_msg[:500])
+
+    def _load_result_video_frames(self, video_path):
+        """将结果视频逐帧读入内存，然后在结果画布显示第一帧并启用播放按钮。"""
+        cap = cv2.VideoCapture(video_path)
+        self.result_frames = []
+        if cap.isOpened():
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                self.result_frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            cap.release()
+
+        if len(self.result_frames) == 0:
+            messagebox.showwarning("提示", "结果视频中没有可读帧！")
+            return
+
+        self.result_current_index = 0
+        self._display_result_frame(0)
+
+        # 启用结果播放/暂停按钮
+        if hasattr(self, 'btn_r_play'):
+            self.btn_r_play.configure(state=tk.NORMAL)
+        if hasattr(self, 'btn_r_pause'):
+            self.btn_r_pause.configure(state=tk.NORMAL)
+
+        messagebox.showinfo("完成",
+                            "抠图推理完成！共 {} 帧，结果视频已保存至：\n{}".format(
+                                len(self.result_frames), self.result_video_path))
+
+    def _display_result_frame(self, frame_index):
+        """在结果预览区域显示指定帧。"""
+        if not self.result_frames or frame_index >= len(self.result_frames):
+            return
+
+        self.result_current_index = frame_index
+        frame = self.result_frames[frame_index]
+
+        canvas_width  = self.canvas_result.winfo_width()
+        canvas_height = self.canvas_result.winfo_height()
+        if canvas_width <= 1 or canvas_height <= 1:
+            canvas_width  = 480
+            canvas_height = 270
+
+        h, w = frame.shape[:2]
+        scale  = min(canvas_width / w, canvas_height / h, 1.0)
+        new_w  = int(w * scale)
+        new_h  = int(h * scale)
+
+        frame_resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        frame_pil     = Image.fromarray(frame_resized)
+        self.result_photo = ImageTk.PhotoImage(frame_pil)
+
+        self.canvas_result.delete("all")
+        x = (canvas_width  - new_w) // 2
+        y = (canvas_height - new_h) // 2
+        self.canvas_result.create_image(x, y, anchor=tk.NW, image=self.result_photo)
+        self.canvas_result.delete("placeholder")
+
+    def _play_result(self):
+        """播放结果视频。"""
+        if not self.result_frames:
+            messagebox.showwarning("提示", "请先完成抠图推理！")
+            return
+        if self.result_is_playing:
+            return
+
+        if self.result_current_index >= len(self.result_frames) - 1:
+            self.result_current_index = 0
+            self.master.after(0, lambda: self._display_result_frame(0))
+
+        self.result_is_playing = True
+        fps   = self.video_fps if hasattr(self, 'video_fps') and self.video_fps > 0 else 25
+        delay = int(1000 / fps)
+
+        def play_loop():
+            while self.result_is_playing and self.result_current_index < len(self.result_frames) - 1:
+                self.result_current_index += 1
+                idx = self.result_current_index
+                self.master.after(0, lambda i=idx: self._display_result_frame(i))
+                time.sleep(delay / 1000.0)
+            if self.result_current_index >= len(self.result_frames) - 1:
+                self.result_is_playing = False
+
+        self.result_play_thread = threading.Thread(target=play_loop, daemon=True)
+        self.result_play_thread.start()
+
+    def _pause_result(self):
+        """暂停结果视频播放。"""
+        self.result_is_playing = False
 
 # --- END OF FILE app6.py ---
