@@ -25,6 +25,44 @@ if _OTVM_DIR not in sys.path:
     sys.path.insert(0, _OTVM_DIR)
 
 
+# ---- 跨平台中文路径兼容的 cv2 读写工具 ----
+def _imread(path, flags=cv2.IMREAD_COLOR):
+    """支持中文路径的 cv2.imread（兼容 Windows GBK 编码问题）"""
+    try:
+        buf = np.fromfile(path, dtype=np.uint8)
+        return cv2.imdecode(buf, flags)
+    except Exception:
+        return cv2.imread(path, flags)
+
+
+def _imwrite(path, img):
+    """支持中文路径的 cv2.imwrite（兼容 Windows GBK 编码问题）"""
+    try:
+        ext = os.path.splitext(path)[1].lower() or '.png'
+        ret, buf = cv2.imencode(ext, img)
+        if ret:
+            buf.tofile(path)
+            return True
+        return False
+    except Exception:
+        return cv2.imwrite(path, img)
+
+
+def _safe_video_capture(path):
+    """支持中文路径的 cv2.VideoCapture（Windows 下转换为短路径）"""
+    if sys.platform.startswith('win'):
+        try:
+            import ctypes
+            buf = ctypes.create_unicode_buffer(512)
+            ctypes.windll.kernel32.GetShortPathNameW(str(path), buf, 512)
+            short_path = buf.value
+            if short_path:
+                return cv2.VideoCapture(short_path)
+        except Exception:
+            pass
+    return cv2.VideoCapture(path)
+
+
 class InteractiveDemoApp(ttk.Frame):
     def __init__(self, master, args, c2t_model, matting_model):
         super().__init__(master)
@@ -97,8 +135,15 @@ class InteractiveDemoApp(ttk.Frame):
         self.bg_canvas = '#1E1E1E'
         self.color_text = '#333333'
 
-        self.font_title = ("Microsoft YaHei", 11, "bold")
-        self.font_normal = ("Microsoft YaHei", 10)
+        # 跨平台字体：Windows 用微软雅黑，macOS 用苹方，Linux 用文泉驿
+        if sys.platform.startswith('win'):
+            _cjk_font = "Microsoft YaHei"
+        elif sys.platform == 'darwin':
+            _cjk_font = "PingFang SC"
+        else:
+            _cjk_font = "WenQuanYi Micro Hei"
+        self.font_title = (_cjk_font, 11, "bold")
+        self.font_normal = (_cjk_font, 10)
 
         # 使用 ttk.Style 配置样式
         style = ttk.Style(self.master)
@@ -375,7 +420,7 @@ class InteractiveDemoApp(ttk.Frame):
                     self._load_video_file(filename)
                 else:
                     # 处理图像文件
-                    image = cv2.cvtColor(cv2.imread(filename), cv2.COLOR_BGR2RGB)
+                    image = cv2.cvtColor(_imread(filename), cv2.COLOR_BGR2RGB)
                     if image is not None:
                         self.canvas.delete("placeholder")
                         self.canvas_trimap.delete("placeholder")
@@ -408,7 +453,7 @@ class InteractiveDemoApp(ttk.Frame):
                 if mask.max() < 256:
                     mask = mask.astype(np.uint8)
                     mask *= 255 // mask.max()
-                cv2.imwrite(trimap_name, trimap)
+                _imwrite(trimap_name, trimap)
 
     def _save_video_callback(self):
         self.menubar.focus_set()
@@ -567,7 +612,7 @@ class InteractiveDemoApp(ttk.Frame):
             return
         
         self.video_path = video_path
-        self.video_capture = cv2.VideoCapture(video_path)
+        self.video_capture = _safe_video_capture(video_path)
         
         if not self.video_capture.isOpened():
             messagebox.showerror("错误", "无法打开视频文件！")
@@ -642,7 +687,7 @@ class InteractiveDemoApp(ttk.Frame):
 
     def _extract_video_frames(self, video_path, total_frames, unique_id):
         """在后台线程中提取视频帧并保存"""
-        cap = cv2.VideoCapture(video_path)
+        cap = _safe_video_capture(video_path)
         if not cap.isOpened():
             self.master.after(0, lambda: messagebox.showerror("错误", "无法打开视频文件！"))
             return
@@ -661,7 +706,7 @@ class InteractiveDemoApp(ttk.Frame):
             
             # 保存帧到文件
             frame_filename = os.path.join(self.frames_folder, f'frame_{i:06d}.png')
-            cv2.imwrite(frame_filename, cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR))
+            _imwrite(frame_filename, cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR))
             frames_saved.append(frame_filename)
             
             # 更新进度条（每10帧更新一次以减少UI负担）
@@ -830,7 +875,7 @@ class InteractiveDemoApp(ttk.Frame):
         # （OTVM run_inference 内部会自动 fallback 到已有三分图）
         first_stem = os.path.splitext(frame_files[0])[0]
         first_trimap_path = os.path.join(self.trimap_folder, first_stem + '.png')
-        cv2.imwrite(first_trimap_path, trimap_np)
+        _imwrite(first_trimap_path, trimap_np)
 
         # 记录关键路径供日志/调试使用
         print('[抠图] 输入视频路径   :', self.video_path)
@@ -962,7 +1007,7 @@ class InteractiveDemoApp(ttk.Frame):
 
     def _load_result_video_frames(self, video_path):
         """将结果视频逐帧读入内存，然后在结果画布显示第一帧并启用播放按钮。"""
-        cap = cv2.VideoCapture(video_path)
+        cap = _safe_video_capture(video_path)
         self.result_frames = []
         if cap.isOpened():
             while True:
