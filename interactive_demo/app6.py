@@ -948,31 +948,98 @@ class InteractiveDemoApp(ttk.Frame):
                 pass
 
     def _run_otvm_inference(self, frames_folder, trimap_folder, output_dir, total_frames):
-        """后台线程：调用 OTVM run_inference 完成推理，完成后回调主线程。"""
+        """后台线程：通过 subprocess 在 OTVM 独立 conda 环境中执行推理。
+
+        子进程（eval.py --run-inference）通过 stdout 输出以下格式的行：
+            PROGRESS:当前帧/总帧数   → 更新进度条
+            RESULT_VIDEO:路径        → 结果视频路径
+            ALPHA_DIR:路径           → alpha帧目录
+            DONE                     → 推理正常结束
+            ERROR:错误信息           → 推理失败
+        """
+        import subprocess
+
+        otvm_eval_script = os.path.join(_OTVM_DIR, 'eval.py')
+
+        # ---- 构建启动命令 ----
+        # 优先使用 conda run 在指定环境中运行；若未配置则直接用 python
+        # OTVM_CONDA_ENV 环境变量可覆盖默认环境名
+        otvm_env = os.environ.get('OTVM_CONDA_ENV', 'otvm')
+        conda_exe = os.environ.get('CONDA_EXE', 'conda')
+
+        cmd_conda = [
+            conda_exe, 'run', '--no-capture-output', '-n', otvm_env,
+            'python', otvm_eval_script,
+            '--run-inference',
+            '--frames-folder', frames_folder,
+            '--trimap-folder', trimap_folder,
+            '--output-dir',    output_dir,
+            '--gpu',           '0',
+        ]
+        cmd_plain = [
+            sys.executable, otvm_eval_script,
+            '--run-inference',
+            '--frames-folder', frames_folder,
+            '--trimap-folder', trimap_folder,
+            '--output-dir',    output_dir,
+            '--gpu',           '0',
+        ]
+
+        # 尝试用 conda run 启动，失败则降级用当前 python（兜底）
         try:
-            # 动态导入 OTVM eval 模块
-            import importlib
-            import eval as otvm_eval
-            importlib.reload(otvm_eval)   # 确保使用最新代码
-
-            def _progress(cur, tot):
-                self.master.after(0, lambda c=cur, t=tot: self._update_inference_progress(c, t))
-
-            result_video_path, alpha_dir = otvm_eval.run_inference(
-                frames_folder=frames_folder,
-                trimap_folder=trimap_folder,
-                output_dir=output_dir,
-                gpu='0',
-                progress_callback=_progress,
+            proc = subprocess.Popen(
+                cmd_conda,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,   # 合并 stderr 到 stdout 以便统一读取
+                text=True,
+                bufsize=1,
+                cwd=_OTVM_DIR,
+            )
+        except FileNotFoundError:
+            proc = subprocess.Popen(
+                cmd_plain,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                cwd=_OTVM_DIR,
             )
 
-            # 推理完成，回调主线程
-            self.master.after(0, lambda: self._on_inference_done(result_video_path))
+        result_video_path = None
+        err_lines = []
 
+        try:
+            for line in proc.stdout:
+                line = line.rstrip('\n')
+                print('[OTVM]', line)   # 同步打印到主控制台，便于调试
+
+                if line.startswith('PROGRESS:'):
+                    try:
+                        cur, tot = line[len('PROGRESS:'):].split('/')
+                        self.master.after(0, lambda c=int(cur), t=int(tot):
+                                          self._update_inference_progress(c, t))
+                    except Exception:
+                        pass
+
+                elif line.startswith('RESULT_VIDEO:'):
+                    result_video_path = line[len('RESULT_VIDEO:'):]
+
+                elif line.startswith('ERROR:'):
+                    err_lines.append(line[len('ERROR:'):])
+
+                elif line == 'DONE':
+                    pass  # 正常结束标志，结果已通过 RESULT_VIDEO 获取
+
+            proc.wait()
         except Exception as e:
             import traceback
-            err_msg = traceback.format_exc()
+            err_lines.append(traceback.format_exc())
+
+        if proc.returncode != 0 or err_lines:
+            err_msg = '\n'.join(err_lines) if err_lines else '子进程退出码: {}'.format(proc.returncode)
             self.master.after(0, lambda msg=err_msg: self._on_inference_error(msg))
+        else:
+            self.master.after(0, lambda: self._on_inference_done(result_video_path))
 
     def _on_inference_done(self, result_video_path):
         """推理完成后的主线程回调：关闭进度窗口、加载结果视频帧、启用播放按钮。"""

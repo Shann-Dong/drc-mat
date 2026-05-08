@@ -458,5 +458,37 @@ def _compose_result_video(frames_folder, alpha_dir, frame_files, output_video_pa
 
 
 if __name__ == "__main__":
-    args, cfg = parse_args()
-    main(cfg, args, args.gpu)
+    # ---- 子进程推理模式 ----
+    # 当被 app6.py 通过 subprocess 调用时，使用独立参数解析，不与 parse_args 冲突
+    import sys as _sys
+    if '--run-inference' in _sys.argv:
+        _parser = argparse.ArgumentParser(description='OTVM subprocess inference')
+        _parser.add_argument('--run-inference', action='store_true')
+        _parser.add_argument('--frames-folder', required=True)
+        _parser.add_argument('--trimap-folder', required=True)
+        _parser.add_argument('--output-dir',    required=True)
+        _parser.add_argument('--gpu',           default='0')
+        _args = _parser.parse_args()
+
+        def _cli_progress(cur, tot):
+            # 输出固定格式供父进程解析，flush 确保实时传递
+            print('PROGRESS:{}/{}'.format(cur, tot), flush=True)
+
+        try:
+            result_video_path, alpha_dir = run_inference(
+                frames_folder=_args.frames_folder,
+                trimap_folder=_args.trimap_folder,
+                output_dir=_args.output_dir,
+                gpu=_args.gpu,
+                progress_callback=_cli_progress,
+            )
+            print('RESULT_VIDEO:{}'.format(result_video_path), flush=True)
+            print('ALPHA_DIR:{}'.format(alpha_dir), flush=True)
+            print('DONE', flush=True)
+        except Exception as _e:
+            import traceback as _tb
+            print('ERROR:{}'.format(_tb.format_exc()), flush=True)
+            _sys.exit(1)
+    else:
+        args, cfg = parse_args()
+        main(cfg, args, args.gpu)
