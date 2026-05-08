@@ -135,15 +135,38 @@ class InteractiveDemoApp(ttk.Frame):
         self.bg_canvas = '#1E1E1E'
         self.color_text = '#333333'
 
-        # 跨平台字体：Windows 用微软雅黑，macOS 用苹方，Linux 用文泉驿
+        # 跨平台字体：动态检测，确保中文显示正常
         if sys.platform.startswith('win'):
             _cjk_font = "Microsoft YaHei"
         elif sys.platform == 'darwin':
             _cjk_font = "PingFang SC"
         else:
-            _cjk_font = "WenQuanYi Micro Hei"
-        self.font_title = (_cjk_font, 11, "bold")
-        self.font_normal = (_cjk_font, 10)
+            # Linux：按优先级检测已安装的中文字体，找不到则用空字符串让 tk 用默认字体
+            _linux_candidates = [
+                "WenQuanYi Micro Hei",
+                "WenQuanYi Zen Hei",
+                "Noto Sans CJK SC",
+                "Noto Sans SC",
+                "Source Han Sans SC",
+                "AR PL UMing CN",
+                "Droid Sans Fallback",
+            ]
+            try:
+                import tkinter.font as tkfont
+                _available = set(tkfont.families(root=self.master))
+                _cjk_font = next(
+                    (f for f in _linux_candidates if f in _available), ""
+                )
+            except Exception:
+                _cjk_font = ""
+        self._cjk_font = _cjk_font  # 保存供 _style_button 使用
+        if _cjk_font:
+            self.font_title = (_cjk_font, 11, "bold")
+            self.font_normal = (_cjk_font, 10)
+        else:
+            # 没有找到中文字体，使用系统默认字体，仅设置大小
+            self.font_title = (10,)
+            self.font_normal = (10,)
 
         # 使用 ttk.Style 配置样式
         style = ttk.Style(self.master)
@@ -157,18 +180,19 @@ class InteractiveDemoApp(ttk.Frame):
         self.master.configure(bg=self.bg_main)
     def _style_button(self, btn, btn_type='default'):
         """颜色块按钮与悬浮(Hover)动画"""
+        _f = getattr(self, '_cjk_font', '')
         if btn_type == 'primary':    # 蓝色 (播放/加载等主要行动)
             normal_bg, hover_bg, fg = '#1890FF', '#40A9FF', '#FFFFFF'
-            font = ("Microsoft YaHei", 10, "bold")
+            font = (_f, 10, "bold") if _f else (10, "bold")
         elif btn_type == 'success':  # 绿色 (开始抠图)
             normal_bg, hover_bg, fg = '#52C41A', '#73D13D', '#FFFFFF'
-            font = ("Microsoft YaHei", 11, "bold")
+            font = (_f, 11, "bold") if _f else (11, "bold")
         elif btn_type == 'danger':   # 红色 (重置/退出)
             normal_bg, hover_bg, fg = '#FF4D4F', '#FF7875', '#FFFFFF'
-            font = ("Microsoft YaHei", 10, "bold")
+            font = (_f, 10, "bold") if _f else (10, "bold")
         elif btn_type == 'warning':  # 橙色 (暂停/撤销)
             normal_bg, hover_bg, fg = '#FAAD14', '#FFC53D', '#FFFFFF'
-            font = ("Microsoft YaHei", 10, "bold")
+            font = (_f, 10, "bold") if _f else (10, "bold")
         elif btn_type == 'navbar':   # 顶部导航白底按钮
             normal_bg, hover_bg, fg = self.bg_panel, '#F0F2F5', self.color_text
             font = self.font_normal
@@ -274,7 +298,7 @@ class InteractiveDemoApp(ttk.Frame):
     def _update_placeholder(self, event, canvas, text):
         canvas.delete("placeholder")
         canvas.create_text(event.width/2, event.height/2, text=text, 
-                           fill="#666666", font=("Microsoft YaHei", 12), tags="placeholder")
+                           fill="#666666", font=(self._cjk_font, 12) if getattr(self, '_cjk_font', '') else (12,), tags="placeholder")
 
     def _add_canvas_img(self, r, c):
         self.canvas_frame, self.canvas = self._create_styled_canvas_frame(r, c, " 图像画布 ", "等待加载图像...")
